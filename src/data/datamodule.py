@@ -27,15 +27,15 @@ class DataManager(pl.LightningDataModule):
             self.input_lang.add_sentence(pair[0])
             self.output_lang.add_sentence(pair[1])
 
-        self.train_data, self.val_data = train_test_split(
-            pairs, train_size=self.config["train_size"]
-        )
-
         if self.config["quantile"] is not None:
             comparator = lambda x: max(len(x[0].split(" ")), len(x[1].split(" ")))
             pairs = sorted(pairs, key=comparator)[
                 : int(len(pairs) * self.config["quantile"])
             ]
+
+        self.train_data, self.val_data = train_test_split(
+            pairs, train_size=self.config["train_size"]
+        )
 
         self.max_len = max(
             [max(len(el[0].split(" ")), len(el[1].split(" "))) for el in pairs]

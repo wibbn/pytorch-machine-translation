@@ -4,65 +4,42 @@ import pytorch_lightning as pl
 from typing import Dict, Tuple, List
 from torchtext.data.metrics import bleu_score
 
-
-class EncoderRNN(torch.nn.Module):
-    def __init__(self, vocab_size: int, embedding_size: int) -> None:
-        super(EncoderRNN, self).__init__()
-        self.embedding_size = embedding_size
-        self.embedding = torch.nn.Embedding(vocab_size, embedding_size)
-        self.gru = torch.nn.GRU(embedding_size, embedding_size, batch_first=True)
-        self.dropout = torch.nn.Dropout(p=0.5)
-
-    def forward(self, input):
-        embedded = self.embedding(input).squeeze()
-        embedded = self.dropout(embedded)
-        _, hidden = self.gru(embedded)
-        return hidden
-
-
-class DecoderRNN(torch.nn.Module):
-    def __init__(self, embedding_size: int, output_size: int) -> None:
-        super(DecoderRNN, self).__init__()
-        self.embedding_size = embedding_size
-        self.embedding = torch.nn.Embedding(output_size, embedding_size)
-        self.gru = torch.nn.GRU(embedding_size, embedding_size)
-        self.out = torch.nn.Linear(embedding_size, output_size)
-        self.softmax = torch.nn.LogSoftmax(dim=2)
-
-    def forward(self, input, hidden, batch_size):
-        output = self.embedding(input).reshape(1, batch_size, self.embedding_size)
-        output, hidden = self.gru(output, hidden)
-        linear_proj = self.out(output)
-        output = self.softmax(linear_proj)
-        return output, hidden
+from models.decoder_rnn import DecoderRNN
+from models.encoder_rnn import EncoderRNN
+from models.attention import Seq2seqAttention
 
 
 class Seq2SeqRNN(pl.LightningModule):
     def __init__(
-        self,
-        encoder_vocab_size: int,
-        encoder_embedding_size: int,
-        decoder_embedding_size: int,
-        decoder_output_size: int,
-        lr: float,
-        output_lang_index2word: Dict[int, str],
+            self,
+            encoder_vocab_size: int,
+            encoder_embedding_size: int,
+            decoder_embedding_size: int,
+            decoder_vocab_size: int,
+            lr: float,
+            output_lang_index2word: Dict[int, str],
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self.lr = lr
         self.output_lang_index2word = output_lang_index2word
         self.encoder = EncoderRNN(
-            vocab_size=encoder_vocab_size, embedding_size=encoder_embedding_size
+            encoder_vocab_size=encoder_vocab_size, embedding_size=encoder_embedding_size
         )
+        self.attention_module = Seq2seqAttention()
         self.decoder = DecoderRNN(
-            embedding_size=decoder_embedding_size, output_size=decoder_output_size
+            embedding_size=decoder_embedding_size, decoder_vocab_size=decoder_vocab_size
         )
 
+        self.vocab_projection_layer = torch.nn.Linear(2 * decoder_embedding_size, decoder_vocab_size)
+
         self.criterion = torch.nn.NLLLoss()
+        self.softmax = torch.nn.LogSoftmax(dim=1)
 
     def forward(self, input_tensor: torch.Tensor):
         batch_size = input_tensor.shape[0]
-        decoder_hidden = (encoder_hidden := self.encoder(input_tensor))
+        encoder_states, encoder_last_hidden = self.encoder(input_tensor)
+        decoder_hidden = encoder_last_hidden
         decoder_input = torch.tensor(
             [[0] * batch_size], dtype=torch.long, device=self.device
         ).view(1, batch_size, 1)
@@ -72,10 +49,14 @@ class Seq2SeqRNN(pl.LightningModule):
             decoder_output, decoder_hidden = self.decoder(
                 decoder_input, decoder_hidden, batch_size
             )
-            _, topi = decoder_output.topk(1)
+            weighted_decoder_output = self.attention_module(decoder_output.squeeze(dim=0), encoder_states)
+            decoder_output = torch.cat([decoder_output.squeeze(dim=0), weighted_decoder_output], dim=1)
+            linear_vocab_proj = self.vocab_projection_layer(decoder_output)
+            target_vocab_distribution = self.softmax(linear_vocab_proj)
+            _, topi = target_vocab_distribution.topk(1)
             predicted.append(topi.clone().detach().cpu())
             decoder_input = topi.reshape(1, batch_size, 1)
-            decoder_outputs.append(decoder_output.squeeze())
+            decoder_outputs.append(target_vocab_distribution.squeeze())
         return predicted, decoder_outputs
 
     def training_step(self, batch, batch_idx):
@@ -136,7 +117,7 @@ class Seq2SeqRNN(pl.LightningModule):
         return optimizer
 
     def calculate_batch_bleu(
-        self, predicted: np.ndarray, actual: np.ndarray
+            self, predicted: np.ndarray, actual: np.ndarray
     ) -> Tuple[float, List[str], List[str]]:
         """Convert predictions to sentences and calculate
         BLEU score.
