@@ -6,11 +6,8 @@ class Seq2seqAttention(torch.nn.Module):
         self.softmax = torch.nn.Softmax(dim=1)
 
     def forward(self, decoder_hidden, encoder_states):
-        """
-        На вход - N состояние экнодера, текущий выход декодера
-        """
         decoder_hidden = decoder_hidden[:, :, None]
         decoder_to_encoder_states = torch.matmul(encoder_states, decoder_hidden)
-        sm_decoder_to_encoder_states = self.softmax(decoder_to_encoder_states).transpose(2, 1)
-        weighted_encoder_states = torch.matmul(sm_decoder_to_encoder_states, encoder_states).squeeze(dim=1)
+        sm_decoder_to_encoder_states = self.softmax(decoder_to_encoder_states)
+        weighted_encoder_states = torch.matmul(sm_decoder_to_encoder_states.transpose(2,1), encoder_states).squeeze(dim=1)
         return weighted_encoder_states

@@ -1,68 +1,58 @@
-import torch
-import pytorch_lightning as pl
-from typing import Optional
-from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
 
-from data.dataset import MtDataset
-from data.utils import TextUtils
+from data.mt_dataset import MTDataset
+from data.space_tokenizer import SpaceTokenizer
+from data.utils import TextUtils, short_text_filter_function
 
 
-class DataManager(pl.LightningDataModule):
-    def __init__(self, config):
+class DataManager:
+    def __init__(self, config, device):
         super().__init__()
         self.config = config
         self.input_lang_n_words = None
         self.output_lang_n_words = None
+        self.device = device
 
-    def prepare_data(self) -> None:
-        self.input_lang, self.output_lang, pairs = TextUtils.read_langs_pairs_from_file(
-            filename=self.config["filename"],
-            lang1=self.config["lang1"],
-            lang2=self.config["lang2"],
-            reverse=self.config["reverse"],
-        )
+    def prepare_data(self):
+        pairs = TextUtils.read_langs_pairs_from_file(filename=self.config["filename"])
+        prefix_filter = self.config['prefix_filter']
+        if prefix_filter:
+            prefix_filter = tuple(prefix_filter)
 
-        pairs = list(filter(self.config["filter"], pairs))
+        source_sentences,target_sentences = [], []
+        # dataset is ambiguous -> i lied -> я солгал/я соврала
+        unique_sources = set()
         for pair in pairs:
-            self.input_lang.add_sentence(pair[0])
-            self.output_lang.add_sentence(pair[1])
+            source, target = pair[0], pair[1]
+            if short_text_filter_function(pair, self.config['max_length'], prefix_filter) and source not in unique_sources:
+                source_sentences.append(source)
+                target_sentences.append(target)
+                unique_sources.add(source)
 
-        if self.config["quantile"] is not None:
-            comparator = lambda x: max(len(x[0].split(" ")), len(x[1].split(" ")))
-            pairs = sorted(pairs, key=comparator)[
-                : int(len(pairs) * self.config["quantile"])
-            ]
+        train_size = int(len(source_sentences)*self.config["train_size"])
+        source_train_sentences, source_val_sentences = source_sentences[:train_size], source_sentences[train_size:]
+        target_train_sentences, target_val_sentences = target_sentences[:train_size], target_sentences[train_size:]
 
-        self.train_data, self.val_data = train_test_split(
-            pairs, train_size=self.config["train_size"]
+        # TODO: Замените на BPE токенизатор
+        self.source_tokenizer = SpaceTokenizer(source_train_sentences, pad_flag=True)
+        tokenized_source_train_sentences = [self.source_tokenizer(s) for s in source_train_sentences]
+        tokenized_source_val_sentences = [self.source_tokenizer(s) for s in source_val_sentences]
+
+        # TODO: Замените на BPE токенизатор
+        self.target_tokenizer = SpaceTokenizer(target_train_sentences, pad_flag=True)
+        tokenized_target_train_sentences = [self.target_tokenizer(s) for s in target_train_sentences]
+        tokenized_target_val_sentences = [self.target_tokenizer(s) for s in target_val_sentences]
+
+        train_dataset = MTDataset(tokenized_source_list=tokenized_source_train_sentences,
+                                  tokenized_target_list=tokenized_target_train_sentences, dev=self.device)
+
+        val_dataset = MTDataset(tokenized_source_list=tokenized_source_val_sentences,
+                                tokenized_target_list=tokenized_target_val_sentences, dev=self.device)
+
+        train_dataloader = DataLoader(train_dataset, shuffle=True,
+                                      batch_size=self.config["batch_size"],
         )
 
-        self.max_len = max(
-            [max(len(el[0].split(" ")), len(el[1].split(" "))) for el in pairs]
-        )
-
-    def setup(self, stage: Optional[str] = None):
-        self.train_dataset = MtDataset(
-            self.input_lang, self.output_lang, self.train_data, self.max_len
-        )
-        self.val_dataset = MtDataset(
-            self.input_lang, self.output_lang, self.val_data, self.max_len
-        )
-        self.input_lang_n_words = self.train_dataset.input_lang.n_words
-        self.output_lang_n_words = self.train_dataset.output_lang.n_words
-
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.train_dataset,
-            shuffle=True,
-            num_workers=self.config["num_workers"],
-            batch_size=self.config["batch_size"],
-        )
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.val_dataset,
-            shuffle=False,
-            num_workers=self.config["num_workers"],
-            batch_size=self.config["batch_size"],
-        )
+        val_dataloader = DataLoader(val_dataset, shuffle=True,
+                                    batch_size=self.config["batch_size"],drop_last=True )
+        return train_dataloader, val_dataloader
