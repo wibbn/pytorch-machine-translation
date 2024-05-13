@@ -1,36 +1,82 @@
 import torch
-
+import torch.nn as nn
 import metrics
+
+import numpy as np
+
+from models.positional_encoding import PositionalEncoding
 
 
 class Seq2SeqTransformer(torch.nn.Module):
-    def __init__(self, device):
+    def __init__(self, device, emb_size, vocab_size, max_seq_len, target_tokenizer,
+                 transformer_params, scheduler_params
+                 ):
         super(Seq2SeqTransformer, self).__init__()
         self.device = device
-       # TODO: Реализуйте конструктор seq2seq трансформера - матрица эмбеддингов, позиционные эмбеддинги, encoder/decoder трансформер, vocab projection head
 
-    def forward(self, input_tensor: torch.Tensor):
-        # TODO: Реализуйте forward pass для модели, при необходимости реализуйте другие функции для обучения
-        pass
+        self.emb_size = emb_size
 
+        self.embedding = nn.Embedding(vocab_size, emb_size).to(device)
+        self.pos_encoder = PositionalEncoding(emb_size, max_seq_len).to(device)
+
+        self.model = nn.Transformer(d_model=emb_size, **transformer_params).to(device)
+        self.decoder = nn.Linear(emb_size, vocab_size).to(device)
+
+        self.loss = nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.Adam(self.parameters())
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, **scheduler_params)
+
+        self.target_tokenizer = target_tokenizer
+
+        self.src_mask = None
+        self.trg_mask = None
+
+    def forward(self, input_tensor: torch.Tensor, target_tensor: torch.Tensor):
+        src = self.embedding(input_tensor).long() * np.sqrt(self.emb_size)
+        src = self.pos_encoder(src)
+        trg = self.embedding(target_tensor).long() * np.sqrt(self.emb_size)
+        trg = self.pos_encoder(trg)
+
+        src = src.permute(1, 0, 2)
+        trg = trg.permute(1, 0, 2)
+
+        output = self.model(
+            src,
+            trg,
+            self.model.generate_square_subsequent_mask(input_tensor.size(1), device=self.device),
+            self.model.generate_square_subsequent_mask(input_tensor.size(1), device=self.device),
+        )
+        output = self.decoder(output).permute(1, 0, 2)
+        res = torch.argmax(output, dim=-1)
+
+        return res.clone(), output
 
     def training_step(self, batch):
-        # TODO: Реализуйте обучение на 1 батче данных по примеру seq2seq_rnn.py
-        pass
+        self.optimizer.zero_grad()
+        input_tensor, target_tensor = batch
+        _, output = self.forward(input_tensor, target_tensor)
+        target = target_tensor.reshape(-1)
+        output = output.reshape(-1, output.shape[-1])
+        loss = self.loss(output, target)
+        loss.backward()
+        self.optimizer.step()
+        return loss.item()
 
     def validation_step(self, batch):
-        # TODO: Реализуйте оценку на 1 батче данных по примеру seq2seq_rnn.py
-        pass
+        input_tensor, target_tensor = batch
+        _, output = self.forward(input_tensor, target_tensor)
+        target = target_tensor.reshape(-1)
+        output = output.reshape(-1, output.shape[-1])
+        loss = self.loss(output, target)
+        return loss.item()
 
     def eval_bleu(self, predicted_ids_list, target_tensor):
-        predicted = torch.stack(predicted_ids_list)
-        predicted = predicted.squeeze().detach().cpu().numpy().swapaxes(0, 1)[:, 1:]
-        actuals = target_tensor.squeeze().detach().cpu().numpy()[:, 1:]
+        predicted = predicted_ids_list.clone()
+        predicted = predicted.squeeze(-1).detach().cpu().numpy()[:, 1:]
+        target = target_tensor.squeeze(-1).detach().cpu().numpy()[:, 1:]
         bleu_score, actual_sentences, predicted_sentences = metrics.bleu_scorer(
-            predicted=predicted, actual=actuals, target_tokenizer=self.target_tokenizer
+            predicted=predicted,
+            actual=target,
+            target_tokenizer=self.target_tokenizer
         )
         return bleu_score, actual_sentences, predicted_sentences
-
-
-
-
